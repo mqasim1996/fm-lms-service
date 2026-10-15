@@ -1,11 +1,12 @@
-# FM LMS Service — Production (Hosted Edition)
+# FM LMS Service — Production (Hosted Edition, Gemini)
 
 Goal-driven Facility Management LMS backend: zero-loss knowledge ingestion, Ask FM (RAG search
 with mandatory citations), and Build My Learning Path (goal → staged competency path).
 
-Architecture: FastAPI runtime (this repo, deployed as a managed workflow from GitHub), Supabase
-Postgres with pgvector as the embedding index, Mistral AI API for classification, grounded answers
-(mistral-small-latest, temperature 0) and embeddings (mistral-embed).
+Architecture: FastAPI runtime (this repo, deployed on Render from GitHub), Supabase Postgres with
+pgvector as the embedding index, and the Google Gemini API (free tier): gemini-2.5-flash for
+classification and grounded answers (temperature 0), gemini-embedding-001 at 768 dimensions for
+embeddings.
 
 Environment variables: DATABASE_URL (Supabase connection string — run supabase_schema.sql first),
-MISTRAL_API_KEY (from console.mistral.ai).
+GEMINI_API_KEY (from Google AI Studio).
