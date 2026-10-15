@@ -61,6 +61,11 @@ async def lifespan(app: FastAPI):
         await DB_POOL.close()
 
 app = FastAPI(title="FM LMS Knowledge Service", lifespan=lifespan)
+@app.get("/")
+async def root():
+    return {"service": "FM LMS Knowledge Service", "status": "ok",
+            "endpoints": ["/health", "/docs", "/ingest/upload", "/ask", "/goal",
+                          "/admin/gaps"]}
 
 @app.get("/")
 async def root():
