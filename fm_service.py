@@ -1,6 +1,6 @@
 """
-FM LMS Production Service — hosted edition
-FastAPI + Supabase (pgvector) + Mistral AI API
+FM LMS Production Service — hosted edition (Gemini free tier)
+FastAPI + Supabase (pgvector) + Google Gemini API
 Zero-loss ingestion · Ask FM RAG · Learning Paths
 """
 import os, io, re, json, time, uuid, hashlib, asyncio, shutil, ssl as sslmod
@@ -14,9 +14,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 DATABASE_URL  = os.getenv("DATABASE_URL", "")          # Supabase Postgres (pgvector)
-MISTRAL_KEY   = os.getenv("MISTRAL_API_KEY", "")
-CHAT_MODEL    = os.getenv("CHAT_MODEL", "mistral-small-latest")
-EMBED_MODEL   = os.getenv("EMBED_MODEL", "mistral-embed")   # 1024 dims
+GEMINI_KEY    = os.getenv("GEMINI_API_KEY", "")
+CHAT_MODEL    = os.getenv("CHAT_MODEL", "gemini-2.5-flash")
+EMBED_MODEL   = os.getenv("EMBED_MODEL", "gemini-embedding-001")
+EMBED_DIMS    = int(os.getenv("EMBED_DIMS", "768"))
+GEMINI_BASE   = "https://generativelanguage.googleapis.com/v1beta"
 MAX_MB        = int(os.getenv("MAX_UPLOAD_MB", "200"))
 CHUNK_TOK     = int(os.getenv("SECTION_MAX_TOKENS", "2000"))
 OVERLAP       = 0.20
@@ -60,30 +62,55 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="FM LMS Knowledge Service", lifespan=lifespan)
 
-# ---------------------------------------------------------------- Mistral AI
+# ---------------------------------------------------------------- Google Gemini
+def _strip_fences(s: str) -> str:
+    """Gemini occasionally wraps JSON in ``` fences even in JSON mode."""
+    s = s.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\n?", "", s).rstrip("`").strip()
+    return s
+
 async def llm(prompt: str, system: str = "", json_mode: bool = False, max_tokens: int = 1500) -> str:
-    msgs = []
-    if system:
-        msgs.append({"role": "system", "content": system})
-    msgs.append({"role": "user", "content": prompt})
-    body = {"model": CHAT_MODEL, "messages": msgs, "temperature": 0,
-            "max_tokens": max_tokens}
+    gen = {"temperature": 0, "maxOutputTokens": max_tokens}
     if json_mode:
-        body["response_format"] = {"type": "json_object"}
+        gen["responseMimeType"] = "application/json"
+    body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": gen}
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
     async with httpx.AsyncClient(timeout=180) as cli:
-        r = await cli.post("https://api.mistral.ai/v1/chat/completions",
-                           headers={"Authorization": "Bearer " + MISTRAL_KEY},
-                           json=body)
+        r = await cli.post(GEMINI_BASE + "/models/" + CHAT_MODEL + ":generateContent",
+                           headers={"x-goog-api-key": GEMINI_KEY}, json=body)
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        return _strip_fences(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+
+def _normalize(vec: list) -> list:
+    """gemini-embedding-001 requires manual L2 normalization at 768 dims."""
+    mag = (sum(x * x for x in vec)) ** 0.5 or 1.0
+    return [x / mag for x in vec]
+
+async def _embed_one(cli, text: str) -> list:
+    for attempt in range(4):                    # backoff on free-tier 429s
+        r = await cli.post(GEMINI_BASE + "/models/" + EMBED_MODEL + ":embedContent",
+                           headers={"x-goog-api-key": GEMINI_KEY},
+                           json={"content": {"parts": [{"text": text[:8000]}]},
+                                 "outputDimensionality": EMBED_DIMS})
+        if r.status_code == 429 and attempt < 3:
+            await asyncio.sleep(2 ** attempt)
+            continue
+        r.raise_for_status()
+        return _normalize(r.json()["embedding"]["values"])
+    raise RuntimeError("embedding rate-limited after retries")
 
 async def embed(texts: list) -> list:
+    if not texts:
+        return []
+    sem = asyncio.Semaphore(5)                 # stay under free-tier RPM
     async with httpx.AsyncClient(timeout=120) as cli:
-        r = await cli.post("https://api.mistral.ai/v1/embeddings",
-                           headers={"Authorization": "Bearer " + MISTRAL_KEY},
-                           json={"model": EMBED_MODEL, "input": texts})
-        r.raise_for_status()
-        return [d["embedding"] for d in r.json()["data"]]
+        async def one(t):
+            async with sem:
+                return await _embed_one(cli, t)
+        return list(await asyncio.gather(*[one(t) for t in texts]))
 
 # ---------------------------------------------------------------- zero-loss extraction
 def _pdf_sections(path: str):
@@ -238,8 +265,8 @@ async def run_ingestion(doc_id, path: str, filename: str):
 async def upload(file: UploadFile = File(...)):
     if not DATABASE_URL:
         raise HTTPException(503, "DATABASE_URL not configured — set the Supabase connection string in deployment environment")
-    if not MISTRAL_KEY:
-        raise HTTPException(503, "MISTRAL_API_KEY not configured")
+    if not GEMINI_KEY:
+        raise HTTPException(503, "GEMINI_API_KEY not configured")
     data, total, sha = io.BytesIO(), 0, hashlib.sha256()
     while True:
         part = await file.read(1024 * 1024)
@@ -370,6 +397,6 @@ async def clear_quarantine(doc_id: uuid.UUID):
 @app.get("/health")
 async def health():
     ok_db = DB_POOL is not None
-    ok_key = bool(MISTRAL_KEY)
-    return {"ready": ok_db and ok_key, "database": ok_db, "mistral_key": ok_key,
+    ok_key = bool(GEMINI_KEY)
+    return {"ready": ok_db and ok_key, "database": ok_db, "gemini_key": ok_key,
             "max_upload_mb": MAX_MB}
