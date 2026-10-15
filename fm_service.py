@@ -62,6 +62,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="FM LMS Knowledge Service", lifespan=lifespan)
 
+@app.get("/")
+async def root():
+    return {"service": "FM LMS Knowledge Service", "status": "ok",
+            "endpoints": ["/health", "/docs", "/ingest/upload", "/ask", "/goal",
+                          "/admin/gaps"]}
+
 # ---------------------------------------------------------------- Google Gemini
 def _strip_fences(s: str) -> str:
     """Gemini occasionally wraps JSON in ``` fences even in JSON mode."""
