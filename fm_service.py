@@ -11,6 +11,7 @@ import asyncpg
 import httpx
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 DATABASE_URL  = os.getenv("DATABASE_URL", "")          # Supabase Postgres (pgvector)
@@ -38,10 +39,10 @@ CATEGORIES = {
     "Operations": ["Opening/Closing", "Shift Handover", "Space Mgmt"],
 }
 SAFETY_CATS = {"Fire & Life Safety", "Emergency Management"}
-STAGE_ORDER = ["FM Fundamentals","Building Systems","Preventive Maintenance",
+STAGE_ORDER = ["FM Fundamentals","HVAC","Electrical","Plumbing","Preventive Maintenance",
                "Health, Safety & Compliance","Contractor Management",
-               "Budget & Cost Management","Emergency & Incident Management",
-               "Team & FM Leadership","Final Manager Assessment"]
+               "Budget & Finance","Emergency Management","Team & Leadership",
+               "Operations","Final Manager Assessment"]
 
 DB_POOL: Optional[asyncpg.Pool] = None
 
@@ -61,11 +62,14 @@ async def lifespan(app: FastAPI):
         await DB_POOL.close()
 
 app = FastAPI(title="FM LMS Knowledge Service", lifespan=lifespan)
-@app.api_route("/", methods=["GET", "HEAD"])
-async def root():
-    return {"service": "FM LMS Knowledge Service", "status": "ok",
-            "endpoints": ["/health", "/docs", "/ingest/upload", "/ask", "/goal",
-                          "/admin/gaps"]}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"service": "FM LMS Knowledge Service", "status": "ok",
@@ -146,13 +150,11 @@ def _docx_sections(path: str):
     import docx
     d = docx.Document(path)
     paras, table_n = [], 0
-    for b in d.element.body.iterchildren():
-        tag = b.tag.split("}")[1]
-        if tag == "p":
-            paras.append(docx.text.paragraph.Paragraph(b, d).text)
-        elif tag == "tbl":
-            paras.append("[TABLE " + str(table_n) + "]")
-            table_n += 1
+    for p in d.paragraphs:
+        paras.append(p.text)
+    for t in d.tables:
+        paras.append("[TABLE " + str(table_n) + "]")
+        table_n += 1
     body = "\n\n".join(paras)
     secs = [{"toc_path": "document", "section": "full", "page": 0,
              "elements": [("paragraph", paras), ("table", str(table_n) + " tables")],
@@ -330,9 +332,9 @@ def tokenize(s): return [w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not
 async def hybrid_retrieve(question, facility):
     async with DB_POOL.acquire() as c:
         qv = (await embed([question]))[0]
-        sem = await c.fetch(RETRIEVE_SQL, qv, facility)
+        results = await c.fetch(RETRIEVE_SQL, qv, facility)
     qt = set(tokenize(question))
-    scored = [{**dict(r), "score": r["sim"] + 0.02 * len(qt & set(tokenize(r["body"])))} for r in sem]
+    scored = [{**dict(r), "score": r["sim"] + 0.02 * len(qt & set(tokenize(r["body"])))} for r in results]
     return sorted(scored, key=lambda r: -r["score"])[:5]
 
 ANSWER_SYSTEM = (
